@@ -1,6 +1,7 @@
 import scipy as sp
+import numpy as np
 from scipy import interpolate
-
+from scipy.stats import norm
 
 def estimate(pv, m=None, verbose=False, lowmem=False, pi0=None):
     """
@@ -89,3 +90,82 @@ def estimate(pv, m=None, verbose=False, lowmem=False, pi0=None):
     qv = qv.reshape(original_shape)
 
     return float(pi0), qv
+
+
+from rpy2.robjects.packages import importr
+from rpy2 import robjects
+from rpy2.robjects import vectors
+
+rstats = importr("stats")
+r_smooth_spline = robjects.r['smooth.spline'] #extract R function# run smoothing function
+
+# this was added by me
+# copy of qvalue::lfdr function of qvalue R-package in python
+def lfdr(p, pi0=None, transf="probit", adj=1.5, eps=1e-8, trunc=True):
+    if np.min(p) < 0 or np.max(p) > 1:
+        raise ValueError("P-values not in valid range [0, 1]")
+    
+    if pi0 is None:
+        pi0, _qvals = estimate(p)
+    n = len(p)
+    if transf == "probit":
+        p = np.clip(p, eps, 1-eps)
+        x = norm.ppf(p)
+        myd = np.array(rstats.density(vectors.FloatVector(x), adjust=adj))
+        myd_x, myd_y = myd[0], myd[1]
+        mys = r_smooth_spline(myd_x, myd_y)
+        y = np.array(robjects.r.predict(mys, vectors.FloatVector(x)))[1, :]
+        lfdr = pi0 * norm.pdf(x) / y
+    else:
+        raise ValueError("Only supported transformations are 'probit' and 'logit' (todo)")
+    
+    if trunc:
+        lfdr[lfdr > 1] = 1
+        
+    return lfdr
+
+
+        
+"""R-code
+lfdr <- function(p, pi0 = NULL, trunc = TRUE, monotone = TRUE,
+                 transf = c("probit", "logit"), adj = 1.5, eps = 10 ^ -8, ...) {
+  # Check inputs
+  lfdr_out <- p
+  rm_na <- !is.na(p)
+  p <- p[rm_na]
+  if (min(p) < 0 || max(p) > 1) {
+    stop("P-values not in valid range [0,1].")
+  } else if (is.null(pi0)) {
+    pi0 <- pi0est(p, ...)$pi0
+  }
+  n <- length(p)
+  transf <- match.arg(transf)
+  # Local FDR method for both probit and logit transformations
+  if (transf == "probit") {
+    p <- pmax(p, eps)
+    p <- pmin(p, 1 - eps)
+    x <- qnorm(p)
+    myd <- density(x, adjust = adj)
+    mys <- smooth.spline(x = myd$x, y = myd$y)
+    y <- predict(mys, x)$y
+    lfdr <- pi0 * dnorm(x) / y
+  } else {
+    x <- log((p + eps) / (1 - p + eps))
+    myd <- density(x, adjust = adj)
+    mys <- smooth.spline(x = myd$x, y = myd$y)
+    y <- predict(mys, x)$y
+    dx <- exp(x) / (1 + exp(x)) ^ 2
+    lfdr <- (pi0 * dx) / y
+  }
+  if (trunc) {
+    lfdr[lfdr > 1] <- 1
+  }
+  if (monotone) {
+    o <- order(p, decreasing = FALSE)
+    ro <- order(o)
+    lfdr <- cummax(lfdr[o])[ro]
+  }
+  lfdr_out[rm_na] <- lfdr
+  return(lfdr_out)
+}
+"""
